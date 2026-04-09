@@ -3,6 +3,7 @@ import {
   Component,
   ItemView,
   MarkdownRenderer,
+  MarkdownView,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -21,6 +22,8 @@ interface BookModeSettings {
   pageHeight: number;
   pageGap: number;
   fontScalePercent: number;
+  defaultFocusMode: boolean;
+  openInBookModeByDefault: boolean;
   showCoverPage: boolean;
   animatePageTurns: boolean;
 }
@@ -36,12 +39,15 @@ const DEFAULT_SETTINGS: BookModeSettings = {
   pageHeight: 560,
   pageGap: 28,
   fontScalePercent: 100,
+  defaultFocusMode: false,
+  openInBookModeByDefault: false,
   showCoverPage: true,
   animatePageTurns: true,
 };
 
 export default class BookModePlugin extends Plugin {
   settings: BookModeSettings = DEFAULT_SETTINGS;
+  private suppressAutoBookMode = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -59,7 +65,7 @@ export default class BookModePlugin extends Plugin {
       id: "open-current-note-in-book-mode",
       name: "Open current note in book mode",
       callback: () => {
-        void this.openCurrentNoteInBookMode();
+        void this.openCurrentNoteInBookMode(this.settings.defaultFocusMode);
       },
     });
 
@@ -159,6 +165,16 @@ export default class BookModePlugin extends Plugin {
       }),
     );
 
+    this.registerEvent(
+      this.app.workspace.on("file-open", (file) => {
+        if (!(file instanceof TFile) || !this.settings.openInBookModeByDefault || this.suppressAutoBookMode) {
+          return;
+        }
+
+        void this.openFileInBookMode(file, this.settings.defaultFocusMode);
+      }),
+    );
+
     this.addSettingTab(new BookModeSettingTab(this.app, this));
   }
 
@@ -187,7 +203,7 @@ export default class BookModePlugin extends Plugin {
     return activeView instanceof BookModeView ? activeView : null;
   }
 
-  private async openCurrentNoteInBookMode(focusMode = false): Promise<void> {
+  private async openCurrentNoteInBookMode(focusMode = this.settings.defaultFocusMode): Promise<void> {
     const file = this.app.workspace.getActiveFile();
 
     if (!(file instanceof TFile)) {
@@ -195,23 +211,44 @@ export default class BookModePlugin extends Plugin {
       return;
     }
 
+    await this.openFileInBookMode(file, focusMode);
+  }
+
+  private async openFileInBookMode(file: TFile, focusMode = this.settings.defaultFocusMode): Promise<void> {
+    const activeView = this.app.workspace.activeLeaf?.view;
+
+    if (activeView instanceof BookModeView && activeView.getFile()?.path === file.path) {
+      return;
+    }
+
     const existingLeaf = this.app.workspace
       .getLeavesOfType(BOOK_VIEW_TYPE)
       .find((leaf) => leaf.view instanceof BookModeView && leaf.view.getFile()?.path === file.path);
 
-    const leaf = existingLeaf ?? this.app.workspace.getLeaf(true);
+    const activeLeaf = this.app.workspace.activeLeaf;
+    const shouldReuseActiveLeaf =
+      activeLeaf?.view instanceof MarkdownView ||
+      activeLeaf?.view?.getViewType?.() === "empty";
+    const leaf = existingLeaf ?? (shouldReuseActiveLeaf && activeLeaf ? activeLeaf : this.app.workspace.getLeaf(true));
 
-    await leaf.setViewState({
-      type: BOOK_VIEW_TYPE,
-      active: true,
-      state: {
-        file: file.path,
-        pageIndex: 0,
-        focusMode,
-      },
-    });
+    this.suppressAutoBookMode = true;
 
-    await this.app.workspace.revealLeaf(leaf);
+    try {
+      await leaf.setViewState({
+        type: BOOK_VIEW_TYPE,
+        active: true,
+        state: {
+          file: file.path,
+          pageIndex: 0,
+          focusMode,
+        },
+      });
+      await this.app.workspace.revealLeaf(leaf);
+    } finally {
+      window.setTimeout(() => {
+        this.suppressAutoBookMode = false;
+      }, 0);
+    }
   }
 
   private async adjustFontScale(delta: number): Promise<void> {
@@ -301,7 +338,7 @@ class BookModeView extends ItemView {
       this.file = null;
       this.pages = [];
       this.currentPageIndex = 0;
-      this.focusMode = false;
+      this.focusMode = this.plugin.settings.defaultFocusMode;
       await this.renderSpread();
       return;
     }
@@ -312,7 +349,7 @@ class BookModeView extends ItemView {
       this.file = null;
       this.pages = [];
       this.currentPageIndex = 0;
-      this.focusMode = false;
+      this.focusMode = this.plugin.settings.defaultFocusMode;
       await this.renderEmptyState(`Book Mode could not find ${viewState.file}.`);
       return;
     }
@@ -320,13 +357,13 @@ class BookModeView extends ItemView {
     if (this.file?.path !== maybeFile.path) {
       this.file = maybeFile;
       this.currentPageIndex = Math.max(0, viewState.pageIndex ?? 0);
-      this.focusMode = Boolean(viewState.focusMode);
+      this.focusMode = viewState.focusMode ?? this.plugin.settings.defaultFocusMode;
       await this.refreshFromSource();
       return;
     }
 
     this.currentPageIndex = Math.max(0, viewState.pageIndex ?? this.currentPageIndex);
-    this.focusMode = Boolean(viewState.focusMode);
+    this.focusMode = viewState.focusMode ?? this.plugin.settings.defaultFocusMode;
     await this.renderSpread();
   }
 
@@ -438,6 +475,7 @@ class BookModeView extends ItemView {
 
   async toggleFocusMode(): Promise<void> {
     this.focusMode = !this.focusMode;
+    await this.plugin.updateSettings({ defaultFocusMode: this.focusMode });
     await this.renderSpread();
   }
 
@@ -892,6 +930,28 @@ class BookModeSettingTab extends PluginSettingTab {
           .onChange((value) => {
             const fontScalePercent = clampNumber(value, 70, 180, DEFAULT_SETTINGS.fontScalePercent);
             void this.plugin.updateSettings({ fontScalePercent });
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Default focus mode")
+      .setDesc("Hide the top toolbar when Book Mode opens.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.defaultFocusMode)
+          .onChange((defaultFocusMode) => {
+            void this.plugin.updateSettings({ defaultFocusMode });
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Open notes in Book Mode by default")
+      .setDesc("When enabled, opening a note automatically switches that leaf into Book Mode.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.openInBookModeByDefault)
+          .onChange((openInBookModeByDefault) => {
+            void this.plugin.updateSettings({ openInBookModeByDefault });
           });
       });
 

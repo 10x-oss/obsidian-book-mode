@@ -33,6 +33,8 @@ var DEFAULT_SETTINGS = {
   pageHeight: 560,
   pageGap: 28,
   fontScalePercent: 100,
+  defaultFocusMode: false,
+  openInBookModeByDefault: false,
   showCoverPage: true,
   animatePageTurns: true
 };
@@ -40,6 +42,7 @@ var BookModePlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
+    this.suppressAutoBookMode = false;
   }
   async onload() {
     await this.loadSettings();
@@ -54,7 +57,7 @@ var BookModePlugin = class extends import_obsidian.Plugin {
       id: "open-current-note-in-book-mode",
       name: "Open current note in book mode",
       callback: () => {
-        void this.openCurrentNoteInBookMode();
+        void this.openCurrentNoteInBookMode(this.settings.defaultFocusMode);
       }
     });
     this.addCommand({
@@ -135,6 +138,14 @@ var BookModePlugin = class extends import_obsidian.Plugin {
         void this.refreshOpenBookViews(file.path);
       })
     );
+    this.registerEvent(
+      this.app.workspace.on("file-open", (file) => {
+        if (!(file instanceof import_obsidian.TFile) || !this.settings.openInBookModeByDefault || this.suppressAutoBookMode) {
+          return;
+        }
+        void this.openFileInBookMode(file, this.settings.defaultFocusMode);
+      })
+    );
     this.addSettingTab(new BookModeSettingTab(this.app, this));
   }
   async onunload() {
@@ -158,24 +169,40 @@ var BookModePlugin = class extends import_obsidian.Plugin {
     const activeView = this.app.workspace.activeLeaf?.view;
     return activeView instanceof BookModeView ? activeView : null;
   }
-  async openCurrentNoteInBookMode(focusMode = false) {
+  async openCurrentNoteInBookMode(focusMode = this.settings.defaultFocusMode) {
     const file = this.app.workspace.getActiveFile();
     if (!(file instanceof import_obsidian.TFile)) {
       new import_obsidian.Notice("Book Mode: open a markdown note first.");
       return;
     }
+    await this.openFileInBookMode(file, focusMode);
+  }
+  async openFileInBookMode(file, focusMode = this.settings.defaultFocusMode) {
+    const activeView = this.app.workspace.activeLeaf?.view;
+    if (activeView instanceof BookModeView && activeView.getFile()?.path === file.path) {
+      return;
+    }
     const existingLeaf = this.app.workspace.getLeavesOfType(BOOK_VIEW_TYPE).find((leaf2) => leaf2.view instanceof BookModeView && leaf2.view.getFile()?.path === file.path);
-    const leaf = existingLeaf ?? this.app.workspace.getLeaf(true);
-    await leaf.setViewState({
-      type: BOOK_VIEW_TYPE,
-      active: true,
-      state: {
-        file: file.path,
-        pageIndex: 0,
-        focusMode
-      }
-    });
-    await this.app.workspace.revealLeaf(leaf);
+    const activeLeaf = this.app.workspace.activeLeaf;
+    const shouldReuseActiveLeaf = activeLeaf?.view instanceof import_obsidian.MarkdownView || activeLeaf?.view?.getViewType?.() === "empty";
+    const leaf = existingLeaf ?? (shouldReuseActiveLeaf && activeLeaf ? activeLeaf : this.app.workspace.getLeaf(true));
+    this.suppressAutoBookMode = true;
+    try {
+      await leaf.setViewState({
+        type: BOOK_VIEW_TYPE,
+        active: true,
+        state: {
+          file: file.path,
+          pageIndex: 0,
+          focusMode
+        }
+      });
+      await this.app.workspace.revealLeaf(leaf);
+    } finally {
+      window.setTimeout(() => {
+        this.suppressAutoBookMode = false;
+      }, 0);
+    }
   }
   async adjustFontScale(delta) {
     const nextPercent = clampNumber(
@@ -248,7 +275,7 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
       this.file = null;
       this.pages = [];
       this.currentPageIndex = 0;
-      this.focusMode = false;
+      this.focusMode = this.plugin.settings.defaultFocusMode;
       await this.renderSpread();
       return;
     }
@@ -257,19 +284,19 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
       this.file = null;
       this.pages = [];
       this.currentPageIndex = 0;
-      this.focusMode = false;
+      this.focusMode = this.plugin.settings.defaultFocusMode;
       await this.renderEmptyState(`Book Mode could not find ${viewState.file}.`);
       return;
     }
     if (this.file?.path !== maybeFile.path) {
       this.file = maybeFile;
       this.currentPageIndex = Math.max(0, viewState.pageIndex ?? 0);
-      this.focusMode = Boolean(viewState.focusMode);
+      this.focusMode = viewState.focusMode ?? this.plugin.settings.defaultFocusMode;
       await this.refreshFromSource();
       return;
     }
     this.currentPageIndex = Math.max(0, viewState.pageIndex ?? this.currentPageIndex);
-    this.focusMode = Boolean(viewState.focusMode);
+    this.focusMode = viewState.focusMode ?? this.plugin.settings.defaultFocusMode;
     await this.renderSpread();
   }
   async onOpen() {
@@ -355,6 +382,7 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
   }
   async toggleFocusMode() {
     this.focusMode = !this.focusMode;
+    await this.plugin.updateSettings({ defaultFocusMode: this.focusMode });
     await this.renderSpread();
   }
   ensureLayout() {
@@ -691,6 +719,16 @@ var BookModeSettingTab = class extends import_obsidian.PluginSettingTab {
       text.setPlaceholder("100").setValue(String(this.plugin.settings.fontScalePercent)).onChange((value) => {
         const fontScalePercent = clampNumber(value, 70, 180, DEFAULT_SETTINGS.fontScalePercent);
         void this.plugin.updateSettings({ fontScalePercent });
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Default focus mode").setDesc("Hide the top toolbar when Book Mode opens.").addToggle((toggle) => {
+      toggle.setValue(this.plugin.settings.defaultFocusMode).onChange((defaultFocusMode) => {
+        void this.plugin.updateSettings({ defaultFocusMode });
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Open notes in Book Mode by default").setDesc("When enabled, opening a note automatically switches that leaf into Book Mode.").addToggle((toggle) => {
+      toggle.setValue(this.plugin.settings.openInBookModeByDefault).onChange((openInBookModeByDefault) => {
+        void this.plugin.updateSettings({ openInBookModeByDefault });
       });
     });
     new import_obsidian.Setting(containerEl).setName("Cover page").setDesc("Insert a generated cover page before the note content.").addToggle((toggle) => {
