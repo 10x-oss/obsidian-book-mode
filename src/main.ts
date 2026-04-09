@@ -3,7 +3,6 @@ import {
   Component,
   ItemView,
   MarkdownRenderer,
-  MarkdownView,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -21,6 +20,7 @@ interface BookModeSettings {
   pageWidth: number;
   pageHeight: number;
   pageGap: number;
+  fontScalePercent: number;
   showCoverPage: boolean;
   animatePageTurns: boolean;
 }
@@ -28,12 +28,14 @@ interface BookModeSettings {
 interface BookModeViewState extends Record<string, unknown> {
   file?: string;
   pageIndex?: number;
+  focusMode?: boolean;
 }
 
 const DEFAULT_SETTINGS: BookModeSettings = {
   pageWidth: 420,
   pageHeight: 560,
   pageGap: 28,
+  fontScalePercent: 100,
   showCoverPage: true,
   animatePageTurns: true,
 };
@@ -97,6 +99,56 @@ export default class BookModePlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "open-current-note-in-focus-book-mode",
+      name: "Open current note in focus book mode",
+      callback: () => {
+        void this.openCurrentNoteInBookMode(true);
+      },
+    });
+
+    this.addCommand({
+      id: "toggle-focus-reading-mode",
+      name: "Toggle focus reading mode",
+      checkCallback: (checking) => {
+        const view = this.getActiveBookView();
+
+        if (!view) {
+          return false;
+        }
+
+        if (!checking) {
+          void view.toggleFocusMode();
+        }
+
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "increase-book-font-size",
+      name: "Increase book font size",
+      callback: () => {
+        void this.adjustFontScale(10);
+      },
+    });
+
+    this.addCommand({
+      id: "decrease-book-font-size",
+      name: "Decrease book font size",
+      callback: () => {
+        void this.adjustFontScale(-10);
+      },
+    });
+
+    this.addCommand({
+      id: "reset-book-font-size",
+      name: "Reset book font size",
+      callback: () => {
+        void this.setFontScale(DEFAULT_SETTINGS.fontScalePercent);
+      },
+    });
+
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (!(file instanceof TFile)) {
@@ -135,7 +187,7 @@ export default class BookModePlugin extends Plugin {
     return activeView instanceof BookModeView ? activeView : null;
   }
 
-  private async openCurrentNoteInBookMode(): Promise<void> {
+  private async openCurrentNoteInBookMode(focusMode = false): Promise<void> {
     const file = this.app.workspace.getActiveFile();
 
     if (!(file instanceof TFile)) {
@@ -155,10 +207,26 @@ export default class BookModePlugin extends Plugin {
       state: {
         file: file.path,
         pageIndex: 0,
+        focusMode,
       },
     });
 
     await this.app.workspace.revealLeaf(leaf);
+  }
+
+  private async adjustFontScale(delta: number): Promise<void> {
+    const nextPercent = clampNumber(
+      String(this.settings.fontScalePercent + delta),
+      70,
+      180,
+      DEFAULT_SETTINGS.fontScalePercent,
+    );
+    await this.setFontScale(nextPercent);
+  }
+
+  private async setFontScale(fontScalePercent: number): Promise<void> {
+    await this.updateSettings({ fontScalePercent });
+    new Notice(`Book Mode font size: ${fontScalePercent}%`);
   }
 
   async refreshOpenBookViews(filePath?: string): Promise<void> {
@@ -185,6 +253,7 @@ class BookModeView extends ItemView {
   private file: TFile | null = null;
   private currentPageIndex = 0;
   private pages: string[] = [];
+  private focusMode = false;
   private frameEl: HTMLElement | null = null;
   private fileLabelEl: HTMLElement | null = null;
   private progressEl: HTMLElement | null = null;
@@ -216,10 +285,11 @@ class BookModeView extends ItemView {
   }
 
   getState(): BookModeViewState {
-    return {
-      file: this.file?.path,
-      pageIndex: this.currentPageIndex,
-    };
+      return {
+        file: this.file?.path,
+        pageIndex: this.currentPageIndex,
+        focusMode: this.focusMode,
+      };
   }
 
   async setState(state: unknown): Promise<void> {
@@ -231,6 +301,7 @@ class BookModeView extends ItemView {
       this.file = null;
       this.pages = [];
       this.currentPageIndex = 0;
+      this.focusMode = false;
       await this.renderSpread();
       return;
     }
@@ -241,6 +312,7 @@ class BookModeView extends ItemView {
       this.file = null;
       this.pages = [];
       this.currentPageIndex = 0;
+      this.focusMode = false;
       await this.renderEmptyState(`Book Mode could not find ${viewState.file}.`);
       return;
     }
@@ -248,11 +320,13 @@ class BookModeView extends ItemView {
     if (this.file?.path !== maybeFile.path) {
       this.file = maybeFile;
       this.currentPageIndex = Math.max(0, viewState.pageIndex ?? 0);
+      this.focusMode = Boolean(viewState.focusMode);
       await this.refreshFromSource();
       return;
     }
 
     this.currentPageIndex = Math.max(0, viewState.pageIndex ?? this.currentPageIndex);
+    this.focusMode = Boolean(viewState.focusMode);
     await this.renderSpread();
   }
 
@@ -362,9 +436,15 @@ class BookModeView extends ItemView {
     await this.renderSpread();
   }
 
+  async toggleFocusMode(): Promise<void> {
+    this.focusMode = !this.focusMode;
+    await this.renderSpread();
+  }
+
   private ensureLayout(): void {
     this.contentEl.empty();
     this.contentEl.addClass("book-mode-view");
+    this.contentEl.toggleClass("book-mode-view--focus", this.focusMode);
     this.applyCssVars();
 
     this.frameEl = this.contentEl.createDiv({ cls: "book-mode-frame" });
@@ -400,6 +480,7 @@ class BookModeView extends ItemView {
     this.contentEl.style.setProperty("--book-mode-page-width", `${this.plugin.settings.pageWidth}px`);
     this.contentEl.style.setProperty("--book-mode-page-height", `${this.plugin.settings.pageHeight}px`);
     this.contentEl.style.setProperty("--book-mode-page-gap", `${this.plugin.settings.pageGap}px`);
+    this.contentEl.style.setProperty("--book-mode-font-scale", `${this.plugin.settings.fontScalePercent}%`);
   }
 
   private ensureMeasureElements(): void {
@@ -802,6 +883,19 @@ class BookModeSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Font scale")
+      .setDesc("Reader font size percentage.")
+      .addText((text) => {
+        text
+          .setPlaceholder("100")
+          .setValue(String(this.plugin.settings.fontScalePercent))
+          .onChange((value) => {
+            const fontScalePercent = clampNumber(value, 70, 180, DEFAULT_SETTINGS.fontScalePercent);
+            void this.plugin.updateSettings({ fontScalePercent });
+          });
+      });
+
+    new Setting(containerEl)
       .setName("Cover page")
       .setDesc("Insert a generated cover page before the note content.")
       .addToggle((toggle) => {
@@ -835,6 +929,7 @@ function normalizeViewState(state: unknown): BookModeViewState {
   return {
     file: typeof maybeState.file === "string" ? maybeState.file : undefined,
     pageIndex: typeof maybeState.pageIndex === "number" ? maybeState.pageIndex : undefined,
+    focusMode: typeof maybeState.focusMode === "boolean" ? maybeState.focusMode : undefined,
   };
 }
 

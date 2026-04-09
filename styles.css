@@ -2,6 +2,7 @@
   --book-mode-page-width: 420px;
   --book-mode-page-height: 560px;
   --book-mode-page-gap: 28px;
+  --book-mode-font-scale: 100%;
   --book-mode-page-padding: 32px;
   --book-mode-surface: color-mix(in srgb, var(--background-primary) 84%, var(--background-secondary));
   --book-mode-shadow: 0 24px 48px rgba(15, 23, 42, 0.12);
@@ -97,6 +98,8 @@
 }
 
 .book-mode-page__content {
+  font-size: var(--book-mode-font-scale);
+  line-height: 1.65;
   min-height: 0;
   overflow: hidden;
 }
@@ -152,6 +155,14 @@
 .book-mode-page--cover p {
   color: var(--text-muted);
   margin: 0;
+}
+
+.book-mode-view--focus .book-mode-toolbar {
+  display: none;
+}
+
+.book-mode-view--focus .book-mode-frame {
+  padding-top: 12px;
 }
 
 .book-mode-measure-host {

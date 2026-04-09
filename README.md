@@ -13,8 +13,13 @@ Book Mode is an Obsidian plugin that opens the active note in a paginated reader
 ## Commands
 
 - `Book Mode: Open current note in book mode`
+- `Book Mode: Open current note in focus book mode`
 - `Book Mode: Next page spread`
 - `Book Mode: Previous page spread`
+- `Book Mode: Toggle focus reading mode`
+- `Book Mode: Increase book font size`
+- `Book Mode: Decrease book font size`
+- `Book Mode: Reset book font size`
 
 ## Notes on pagination
 

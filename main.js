@@ -32,6 +32,7 @@ var DEFAULT_SETTINGS = {
   pageWidth: 420,
   pageHeight: 560,
   pageGap: 28,
+  fontScalePercent: 100,
   showCoverPage: true,
   animatePageTurns: true
 };
@@ -84,6 +85,48 @@ var BookModePlugin = class extends import_obsidian.Plugin {
         return true;
       }
     });
+    this.addCommand({
+      id: "open-current-note-in-focus-book-mode",
+      name: "Open current note in focus book mode",
+      callback: () => {
+        void this.openCurrentNoteInBookMode(true);
+      }
+    });
+    this.addCommand({
+      id: "toggle-focus-reading-mode",
+      name: "Toggle focus reading mode",
+      checkCallback: (checking) => {
+        const view = this.getActiveBookView();
+        if (!view) {
+          return false;
+        }
+        if (!checking) {
+          void view.toggleFocusMode();
+        }
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "increase-book-font-size",
+      name: "Increase book font size",
+      callback: () => {
+        void this.adjustFontScale(10);
+      }
+    });
+    this.addCommand({
+      id: "decrease-book-font-size",
+      name: "Decrease book font size",
+      callback: () => {
+        void this.adjustFontScale(-10);
+      }
+    });
+    this.addCommand({
+      id: "reset-book-font-size",
+      name: "Reset book font size",
+      callback: () => {
+        void this.setFontScale(DEFAULT_SETTINGS.fontScalePercent);
+      }
+    });
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (!(file instanceof import_obsidian.TFile)) {
@@ -115,7 +158,7 @@ var BookModePlugin = class extends import_obsidian.Plugin {
     const activeView = this.app.workspace.activeLeaf?.view;
     return activeView instanceof BookModeView ? activeView : null;
   }
-  async openCurrentNoteInBookMode() {
+  async openCurrentNoteInBookMode(focusMode = false) {
     const file = this.app.workspace.getActiveFile();
     if (!(file instanceof import_obsidian.TFile)) {
       new import_obsidian.Notice("Book Mode: open a markdown note first.");
@@ -128,10 +171,24 @@ var BookModePlugin = class extends import_obsidian.Plugin {
       active: true,
       state: {
         file: file.path,
-        pageIndex: 0
+        pageIndex: 0,
+        focusMode
       }
     });
     await this.app.workspace.revealLeaf(leaf);
+  }
+  async adjustFontScale(delta) {
+    const nextPercent = clampNumber(
+      String(this.settings.fontScalePercent + delta),
+      70,
+      180,
+      DEFAULT_SETTINGS.fontScalePercent
+    );
+    await this.setFontScale(nextPercent);
+  }
+  async setFontScale(fontScalePercent) {
+    await this.updateSettings({ fontScalePercent });
+    new import_obsidian.Notice(`Book Mode font size: ${fontScalePercent}%`);
   }
   async refreshOpenBookViews(filePath) {
     const leaves = this.app.workspace.getLeavesOfType(BOOK_VIEW_TYPE);
@@ -153,6 +210,7 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     this.file = null;
     this.currentPageIndex = 0;
     this.pages = [];
+    this.focusMode = false;
     this.frameEl = null;
     this.fileLabelEl = null;
     this.progressEl = null;
@@ -179,7 +237,8 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
   getState() {
     return {
       file: this.file?.path,
-      pageIndex: this.currentPageIndex
+      pageIndex: this.currentPageIndex,
+      focusMode: this.focusMode
     };
   }
   async setState(state) {
@@ -189,6 +248,7 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
       this.file = null;
       this.pages = [];
       this.currentPageIndex = 0;
+      this.focusMode = false;
       await this.renderSpread();
       return;
     }
@@ -197,16 +257,19 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
       this.file = null;
       this.pages = [];
       this.currentPageIndex = 0;
+      this.focusMode = false;
       await this.renderEmptyState(`Book Mode could not find ${viewState.file}.`);
       return;
     }
     if (this.file?.path !== maybeFile.path) {
       this.file = maybeFile;
       this.currentPageIndex = Math.max(0, viewState.pageIndex ?? 0);
+      this.focusMode = Boolean(viewState.focusMode);
       await this.refreshFromSource();
       return;
     }
     this.currentPageIndex = Math.max(0, viewState.pageIndex ?? this.currentPageIndex);
+    this.focusMode = Boolean(viewState.focusMode);
     await this.renderSpread();
   }
   async onOpen() {
@@ -290,9 +353,14 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     this.currentPageIndex = previousIndex;
     await this.renderSpread();
   }
+  async toggleFocusMode() {
+    this.focusMode = !this.focusMode;
+    await this.renderSpread();
+  }
   ensureLayout() {
     this.contentEl.empty();
     this.contentEl.addClass("book-mode-view");
+    this.contentEl.toggleClass("book-mode-view--focus", this.focusMode);
     this.applyCssVars();
     this.frameEl = this.contentEl.createDiv({ cls: "book-mode-frame" });
     const toolbarEl = this.frameEl.createDiv({ cls: "book-mode-toolbar" });
@@ -322,6 +390,7 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     this.contentEl.style.setProperty("--book-mode-page-width", `${this.plugin.settings.pageWidth}px`);
     this.contentEl.style.setProperty("--book-mode-page-height", `${this.plugin.settings.pageHeight}px`);
     this.contentEl.style.setProperty("--book-mode-page-gap", `${this.plugin.settings.pageGap}px`);
+    this.contentEl.style.setProperty("--book-mode-font-scale", `${this.plugin.settings.fontScalePercent}%`);
   }
   ensureMeasureElements() {
     if (!this.contentEl.isConnected) {
@@ -618,6 +687,12 @@ var BookModeSettingTab = class extends import_obsidian.PluginSettingTab {
         void this.plugin.updateSettings({ pageGap });
       });
     });
+    new import_obsidian.Setting(containerEl).setName("Font scale").setDesc("Reader font size percentage.").addText((text) => {
+      text.setPlaceholder("100").setValue(String(this.plugin.settings.fontScalePercent)).onChange((value) => {
+        const fontScalePercent = clampNumber(value, 70, 180, DEFAULT_SETTINGS.fontScalePercent);
+        void this.plugin.updateSettings({ fontScalePercent });
+      });
+    });
     new import_obsidian.Setting(containerEl).setName("Cover page").setDesc("Insert a generated cover page before the note content.").addToggle((toggle) => {
       toggle.setValue(this.plugin.settings.showCoverPage).onChange((showCoverPage) => {
         void this.plugin.updateSettings({ showCoverPage });
@@ -637,7 +712,8 @@ function normalizeViewState(state) {
   const maybeState = state;
   return {
     file: typeof maybeState.file === "string" ? maybeState.file : void 0,
-    pageIndex: typeof maybeState.pageIndex === "number" ? maybeState.pageIndex : void 0
+    pageIndex: typeof maybeState.pageIndex === "number" ? maybeState.pageIndex : void 0,
+    focusMode: typeof maybeState.focusMode === "boolean" ? maybeState.focusMode : void 0
   };
 }
 function splitMarkdownIntoBlocks(markdown) {
