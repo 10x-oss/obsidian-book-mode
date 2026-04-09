@@ -1,0 +1,10 @@
+{
+  "id": "book-mode",
+  "name": "Book Mode",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Read the active note in a paginated two-page spread with left and right navigation.",
+  "author": "10x",
+  "authorUrl": "https://github.com/10x-oss",
+  "isDesktopOnly": false
+}
