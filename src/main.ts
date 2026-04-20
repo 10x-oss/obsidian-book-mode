@@ -24,6 +24,8 @@ interface BookModeSettings {
   fontScalePercent: number;
   defaultFocusMode: boolean;
   openInBookModeByDefault: boolean;
+  autoOpenFolderPaths: string[];
+  debugMode: boolean;
   showCoverPage: boolean;
   animatePageTurns: boolean;
 }
@@ -34,6 +36,18 @@ interface BookModeViewState extends Record<string, unknown> {
   focusMode?: boolean;
 }
 
+interface MarkdownBlock {
+  markdown: string;
+  startOffset: number;
+  endOffset: number;
+}
+
+interface BookPage {
+  markdown: string;
+  startOffset: number | null;
+  endOffset: number | null;
+}
+
 const DEFAULT_SETTINGS: BookModeSettings = {
   pageWidth: 420,
   pageHeight: 560,
@@ -41,6 +55,8 @@ const DEFAULT_SETTINGS: BookModeSettings = {
   fontScalePercent: 100,
   defaultFocusMode: false,
   openInBookModeByDefault: false,
+  autoOpenFolderPaths: [],
+  debugMode: false,
   showCoverPage: true,
   animatePageTurns: true,
 };
@@ -48,6 +64,7 @@ const DEFAULT_SETTINGS: BookModeSettings = {
 export default class BookModePlugin extends Plugin {
   settings: BookModeSettings = DEFAULT_SETTINGS;
   private suppressAutoBookMode = false;
+  private autoOpenRequestId = 0;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -155,6 +172,14 @@ export default class BookModePlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "show-book-mode-debug-state",
+      name: "Show Book Mode debug state",
+      callback: () => {
+        this.showDebugState();
+      },
+    });
+
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (!(file instanceof TFile)) {
@@ -167,11 +192,50 @@ export default class BookModePlugin extends Plugin {
 
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
-        if (!(file instanceof TFile) || !this.settings.openInBookModeByDefault || this.suppressAutoBookMode) {
+        if (!(file instanceof TFile)) {
+          this.debugLog("file-open skipped: not a file", {
+            file,
+          });
           return;
         }
 
-        void this.openFileInBookMode(file, this.settings.defaultFocusMode);
+        const matchesFolder = this.shouldAutoOpenFile(file);
+
+        this.debugLog("file-open", {
+          filePath: file.path,
+          openInBookModeByDefault: this.settings.openInBookModeByDefault,
+          suppressAutoBookMode: this.suppressAutoBookMode,
+          matchesFolder,
+          activeLeafType: this.app.workspace.activeLeaf?.view?.getViewType?.() ?? "none",
+          activeFilePath: this.app.workspace.getActiveFile()?.path ?? null,
+        });
+
+        if (
+          !this.settings.openInBookModeByDefault ||
+          this.suppressAutoBookMode ||
+          !matchesFolder
+        ) {
+          this.debugLog("auto-open blocked", {
+            filePath: file.path,
+            reason: !this.settings.openInBookModeByDefault
+              ? "setting-disabled"
+              : this.suppressAutoBookMode
+                ? "suppressed"
+                : "folder-mismatch",
+          });
+          return;
+        }
+
+        this.scheduleAutoOpen(file);
+      }),
+    );
+
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        this.debugLog("active-leaf-change", {
+          leafType: leaf?.view?.getViewType?.() ?? "none",
+          filePath: getLeafFilePath(leaf) ?? null,
+        });
       }),
     );
 
@@ -203,6 +267,91 @@ export default class BookModePlugin extends Plugin {
     return activeView instanceof BookModeView ? activeView : null;
   }
 
+  private shouldAutoOpenFile(file: TFile): boolean {
+    const folderPaths = this.settings.autoOpenFolderPaths
+      .map(normalizeFolderPath)
+      .filter(Boolean);
+
+    if (!folderPaths.length) {
+      return true;
+    }
+
+    const normalizedFilePath = file.path.toLowerCase();
+
+    return folderPaths.some((folderPath) => {
+      const normalizedFolderPath = folderPath.toLowerCase();
+      return normalizedFilePath.startsWith(`${normalizedFolderPath}/`);
+    });
+  }
+
+  private showDebugState(): void {
+    const activeLeaf = this.app.workspace.activeLeaf;
+    const activeFile = this.app.workspace.getActiveFile();
+    const message = [
+      `Book Mode debug`,
+      `file=${activeFile?.path ?? "none"}`,
+      `activeLeaf=${activeLeaf?.view?.getViewType?.() ?? "none"}`,
+      `autoOpen=${String(this.settings.openInBookModeByDefault)}`,
+      `suppress=${String(this.suppressAutoBookMode)}`,
+      `folders=${this.settings.autoOpenFolderPaths.join(", ") || "(all)"}`,
+      `matches=${activeFile instanceof TFile ? String(this.shouldAutoOpenFile(activeFile)) : "n/a"}`,
+    ].join(" | ");
+
+    this.debugLog("manual state dump", { message }, true);
+  }
+
+  private debugLog(event: string, details: Record<string, unknown>, showNotice = false): void {
+    if (!this.settings.debugMode && !showNotice) {
+      return;
+    }
+
+    const payload = {
+      event,
+      ...details,
+    };
+
+    console.info("[Book Mode]", payload);
+
+    if (showNotice) {
+      const message = typeof details.message === "string"
+        ? details.message
+        : `${event}: ${JSON.stringify(details)}`;
+      new Notice(message, 8000);
+    }
+  }
+
+  private scheduleAutoOpen(file: TFile): void {
+    const requestId = ++this.autoOpenRequestId;
+
+    this.debugLog("scheduleAutoOpen", {
+      requestId,
+      filePath: file.path,
+    });
+
+    window.setTimeout(() => {
+      if (requestId !== this.autoOpenRequestId) {
+        this.debugLog("scheduleAutoOpen canceled: superseded", {
+          requestId,
+          filePath: file.path,
+        });
+        return;
+      }
+
+      const activeFile = this.app.workspace.getActiveFile();
+
+      if (!(activeFile instanceof TFile) || activeFile.path !== file.path) {
+        this.debugLog("scheduleAutoOpen canceled: active file changed", {
+          requestId,
+          expectedFilePath: file.path,
+          activeFilePath: activeFile?.path ?? null,
+        });
+        return;
+      }
+
+      void this.openFileInBookMode(file, this.settings.defaultFocusMode, 1);
+    }, 0);
+  }
+
   private async openCurrentNoteInBookMode(focusMode = this.settings.defaultFocusMode): Promise<void> {
     const file = this.app.workspace.getActiveFile();
 
@@ -214,10 +363,17 @@ export default class BookModePlugin extends Plugin {
     await this.openFileInBookMode(file, focusMode);
   }
 
-  private async openFileInBookMode(file: TFile, focusMode = this.settings.defaultFocusMode): Promise<void> {
+  private async openFileInBookMode(
+    file: TFile,
+    focusMode = this.settings.defaultFocusMode,
+    attempt = 1,
+  ): Promise<void> {
     const activeView = this.app.workspace.activeLeaf?.view;
 
     if (activeView instanceof BookModeView && activeView.getFile()?.path === file.path) {
+      this.debugLog("openFileInBookMode skipped: already open", {
+        filePath: file.path,
+      });
       return;
     }
 
@@ -230,6 +386,15 @@ export default class BookModePlugin extends Plugin {
       activeLeaf?.view instanceof MarkdownView ||
       activeLeaf?.view?.getViewType?.() === "empty";
     const leaf = existingLeaf ?? (shouldReuseActiveLeaf && activeLeaf ? activeLeaf : this.app.workspace.getLeaf(true));
+
+    this.debugLog("openFileInBookMode", {
+      filePath: file.path,
+      focusMode,
+      attempt,
+      reusedExistingLeaf: Boolean(existingLeaf),
+      reusedActiveLeaf: !existingLeaf && shouldReuseActiveLeaf && Boolean(activeLeaf),
+      targetLeafTypeBeforeOpen: leaf.view.getViewType?.() ?? "unknown",
+    });
 
     this.suppressAutoBookMode = true;
 
@@ -244,9 +409,46 @@ export default class BookModePlugin extends Plugin {
         },
       });
       await this.app.workspace.revealLeaf(leaf);
+
+      const openedInBookMode = leaf.view instanceof BookModeView && leaf.view.getFile()?.path === file.path;
+
+      this.debugLog("openFileInBookMode result", {
+        filePath: file.path,
+        attempt,
+        targetLeafTypeAfterOpen: leaf.view.getViewType?.() ?? "unknown",
+        openedInBookMode,
+      });
+
+      if (!openedInBookMode && attempt < 3) {
+        const retryDelayMs = attempt * 40;
+
+        this.debugLog("openFileInBookMode retry scheduled", {
+          filePath: file.path,
+          nextAttempt: attempt + 1,
+          retryDelayMs,
+        });
+
+        window.setTimeout(() => {
+          const activeFile = this.app.workspace.getActiveFile();
+
+          if (!(activeFile instanceof TFile) || activeFile.path !== file.path) {
+            this.debugLog("openFileInBookMode retry canceled: active file changed", {
+              filePath: file.path,
+              nextAttempt: attempt + 1,
+              activeFilePath: activeFile?.path ?? null,
+            });
+            return;
+          }
+
+          void this.openFileInBookMode(file, focusMode, attempt + 1);
+        }, retryDelayMs);
+      }
     } finally {
       window.setTimeout(() => {
         this.suppressAutoBookMode = false;
+        this.debugLog("auto-open suppression cleared", {
+          filePath: file.path,
+        });
       }, 0);
     }
   }
@@ -289,7 +491,7 @@ class BookModeView extends ItemView {
   private readonly plugin: BookModePlugin;
   private file: TFile | null = null;
   private currentPageIndex = 0;
-  private pages: string[] = [];
+  private pages: BookPage[] = [];
   private focusMode = false;
   private frameEl: HTMLElement | null = null;
   private fileLabelEl: HTMLElement | null = null;
@@ -403,6 +605,22 @@ class BookModeView extends ItemView {
 
   getFile(): TFile | null {
     return this.file;
+  }
+
+  async jumpToSourceOffset(offset: number): Promise<boolean> {
+    if (!this.pages.length) {
+      return false;
+    }
+
+    const pageIndex = this.findPageIndexForOffset(offset);
+
+    if (pageIndex < 0) {
+      return false;
+    }
+
+    this.currentPageIndex = pageIndex;
+    await this.renderSpread();
+    return true;
   }
 
   async refreshFromSource(): Promise<void> {
@@ -572,7 +790,8 @@ class BookModeView extends ItemView {
 
     for (let offset = 0; offset < visiblePages.length; offset += 1) {
       const pageNumber = start + offset + 1;
-      const markdown = visiblePages[offset];
+      const page = visiblePages[offset];
+      const markdown = page.markdown;
       const isCoverPage = this.plugin.settings.showCoverPage && pageNumber === 1;
       const pageEl = this.createPageElement(pageNumber, isCoverPage);
       const pageContentEl = pageEl.querySelector(".book-mode-page__content");
@@ -659,24 +878,28 @@ class BookModeView extends ItemView {
     });
   }
 
-  private async paginateMarkdown(markdown: string): Promise<string[]> {
-    const source = markdown.replace(/\r\n/g, "\n").trim();
+  private async paginateMarkdown(markdown: string): Promise<BookPage[]> {
+    const source = markdown.replace(/\r\n/g, "\n");
     const blocks = splitMarkdownIntoBlocks(source);
-    const pages: string[] = [];
-    let currentBlocks: string[] = [];
+    const pages: BookPage[] = [];
+    let currentBlocks: MarkdownBlock[] = [];
 
     const pushCurrentPage = (): void => {
-      const pageMarkdown = joinBlocks(currentBlocks);
+      const pageMarkdown = joinBlocks(currentBlocks.map((block) => block.markdown));
 
       if (pageMarkdown) {
-        pages.push(pageMarkdown);
+        pages.push({
+          markdown: pageMarkdown,
+          startOffset: currentBlocks[0]?.startOffset ?? null,
+          endOffset: currentBlocks[currentBlocks.length - 1]?.endOffset ?? null,
+        });
       }
 
       currentBlocks = [];
     };
 
     for (const block of blocks) {
-      const candidate = joinBlocks([...currentBlocks, block]);
+      const candidate = joinBlocks([...currentBlocks, block].map((item) => item.markdown));
 
       if (candidate && (await this.pageFits(candidate))) {
         currentBlocks.push(block);
@@ -687,7 +910,7 @@ class BookModeView extends ItemView {
         pushCurrentPage();
       }
 
-      if (await this.pageFits(block)) {
+      if (await this.pageFits(block.markdown)) {
         currentBlocks = [block];
         continue;
       }
@@ -695,7 +918,7 @@ class BookModeView extends ItemView {
       const splitParts = await this.splitOversizedBlock(block);
 
       for (const part of splitParts) {
-        const splitCandidate = joinBlocks([...currentBlocks, part]);
+        const splitCandidate = joinBlocks([...currentBlocks, part].map((item) => item.markdown));
 
         if (splitCandidate && (await this.pageFits(splitCandidate))) {
           currentBlocks.push(part);
@@ -706,10 +929,14 @@ class BookModeView extends ItemView {
           pushCurrentPage();
         }
 
-        if (await this.pageFits(part)) {
+        if (await this.pageFits(part.markdown)) {
           currentBlocks = [part];
         } else {
-          pages.push(part);
+          pages.push({
+            markdown: part.markdown,
+            startOffset: part.startOffset,
+            endOffset: part.endOffset,
+          });
         }
       }
     }
@@ -719,51 +946,67 @@ class BookModeView extends ItemView {
     }
 
     if (!pages.length && this.file) {
-      pages.push(`# ${this.file.basename}\n\n_This note is empty._`);
+      pages.push({
+        markdown: `# ${this.file.basename}\n\n_This note is empty._`,
+        startOffset: null,
+        endOffset: null,
+      });
     }
 
     if (this.plugin.settings.showCoverPage && this.file) {
-      pages.unshift(buildCoverPageMarkdown(this.file));
+      pages.unshift({
+        markdown: buildCoverPageMarkdown(this.file),
+        startOffset: null,
+        endOffset: null,
+      });
     }
 
     return pages;
   }
 
-  private async splitOversizedBlock(block: string): Promise<string[]> {
-    if (isHardToSplitBlock(block)) {
+  private async splitOversizedBlock(block: MarkdownBlock): Promise<MarkdownBlock[]> {
+    if (isHardToSplitBlock(block.markdown)) {
       return [block];
     }
 
-    const lineUnits = block.split("\n").filter((line) => line.trim().length > 0);
+    const lineUnits = block.markdown.split("\n").filter((line) => line.trim().length > 0);
 
     if (lineUnits.length > 1) {
-      return this.packUnitsIntoPages(lineUnits, "\n");
+      return this.packUnitsIntoPages(lineUnits, "\n", block);
     }
 
-    const sentenceUnits = splitIntoSentences(block);
+    const sentenceUnits = splitIntoSentences(block.markdown);
 
     if (sentenceUnits.length > 1) {
-      return this.packUnitsIntoPages(sentenceUnits, " ");
+      return this.packUnitsIntoPages(sentenceUnits, " ", block);
     }
 
-    const wordUnits = block.split(/\s+/).filter(Boolean);
+    const wordUnits = block.markdown.split(/\s+/).filter(Boolean);
 
     if (wordUnits.length > 1) {
-      return this.packUnitsIntoPages(wordUnits, " ");
+      return this.packUnitsIntoPages(wordUnits, " ", block);
     }
 
     return [block];
   }
 
-  private async packUnitsIntoPages(units: string[], joiner: string): Promise<string[]> {
-    const pages: string[] = [];
+  private async packUnitsIntoPages(
+    units: string[],
+    joiner: string,
+    sourceBlock: MarkdownBlock,
+  ): Promise<MarkdownBlock[]> {
+    const pages: MarkdownBlock[] = [];
     let currentUnits: string[] = [];
 
     const pushCurrent = (): void => {
       const pageMarkdown = currentUnits.join(joiner).trim();
 
       if (pageMarkdown) {
-        pages.push(pageMarkdown);
+        pages.push({
+          markdown: pageMarkdown,
+          startOffset: sourceBlock.startOffset,
+          endOffset: sourceBlock.endOffset,
+        });
       }
 
       currentUnits = [];
@@ -792,7 +1035,11 @@ class BookModeView extends ItemView {
       pushCurrent();
     }
 
-    return pages.length ? pages : [units.join(joiner)];
+    return pages.length ? pages : [{
+      markdown: units.join(joiner),
+      startOffset: sourceBlock.startOffset,
+      endOffset: sourceBlock.endOffset,
+    }];
   }
 
   private async pageFits(markdown: string): Promise<boolean> {
@@ -864,6 +1111,30 @@ class BookModeView extends ItemView {
 
   private getMaxStartIndex(pagesPerSpread: number): number {
     return Math.max(0, this.pages.length - pagesPerSpread);
+  }
+
+  private findPageIndexForOffset(offset: number): number {
+    const rawIndex = this.pages.findIndex((page) => {
+      if (page.startOffset === null || page.endOffset === null) {
+        return false;
+      }
+
+      return offset >= page.startOffset && offset <= page.endOffset;
+    });
+
+    if (rawIndex >= 0) {
+      return this.normalizePageIndex(rawIndex, this.getPagesPerSpread());
+    }
+
+    const nearestIndex = this.pages.findIndex((page) => page.startOffset !== null && page.startOffset > offset);
+
+    if (nearestIndex > 0) {
+      return this.normalizePageIndex(nearestIndex - 1, this.getPagesPerSpread());
+    }
+
+    return nearestIndex === 0
+      ? this.normalizePageIndex(0, this.getPagesPerSpread())
+      : -1;
   }
 }
 
@@ -946,12 +1217,43 @@ class BookModeSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Open notes in Book Mode by default")
-      .setDesc("When enabled, opening a note automatically switches that leaf into Book Mode.")
+      .setDesc("When enabled, opening a note automatically switches that leaf into Book Mode. Use the folder list below to limit where this happens.")
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.openInBookModeByDefault)
           .onChange((openInBookModeByDefault) => {
             void this.plugin.updateSettings({ openInBookModeByDefault });
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Auto-open folders")
+      .setDesc("One vault-relative folder path per line. 'books' matches everything under books/. 'books/audiobooks' matches only that subtree.")
+      .addTextArea((text) => {
+        text
+          .setPlaceholder("books\nreading/longform")
+          .setValue(this.plugin.settings.autoOpenFolderPaths.join("\n"))
+          .onChange((value) => {
+            const autoOpenFolderPaths = value
+              .split("\n")
+              .map(normalizeFolderPath)
+              .filter(Boolean);
+
+            void this.plugin.updateSettings({ autoOpenFolderPaths });
+          });
+
+        text.inputEl.rows = 4;
+        text.inputEl.cols = 32;
+      });
+
+    new Setting(containerEl)
+      .setName("Debug mode")
+      .setDesc("Log auto-open decisions to the developer console. Helpful when Book Mode seems inconsistent.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.debugMode)
+          .onChange((debugMode) => {
+            void this.plugin.updateSettings({ debugMode });
           });
       });
 
@@ -993,46 +1295,70 @@ function normalizeViewState(state: unknown): BookModeViewState {
   };
 }
 
-function splitMarkdownIntoBlocks(markdown: string): string[] {
+function splitMarkdownIntoBlocks(markdown: string): MarkdownBlock[] {
   if (!markdown.trim()) {
     return [];
   }
 
   const lines = markdown.split("\n");
-  const blocks: string[] = [];
+  const blocks: MarkdownBlock[] = [];
   let currentBlock: string[] = [];
+  let currentBlockStart: number | null = null;
+  let currentBlockEnd: number | null = null;
   let inFence = false;
+  let cursor = 0;
 
   const flush = (): void => {
     const block = currentBlock.join("\n").trim();
 
-    if (block) {
-      blocks.push(block);
+    if (block && currentBlockStart !== null && currentBlockEnd !== null) {
+      blocks.push({
+        markdown: block,
+        startOffset: currentBlockStart,
+        endOffset: currentBlockEnd,
+      });
     }
 
     currentBlock = [];
+    currentBlockStart = null;
+    currentBlockEnd = null;
   };
 
   for (const line of lines) {
+    const lineStart = cursor;
+    const lineEnd = lineStart + line.length;
     const trimmed = line.trim();
 
     if (/^(```+|~~~+)/.test(trimmed)) {
+      if (currentBlockStart === null) {
+        currentBlockStart = lineStart;
+      }
+
       currentBlock.push(line);
+      currentBlockEnd = lineEnd;
       inFence = !inFence;
 
       if (!inFence) {
         flush();
       }
 
+      cursor = lineEnd + 1;
       continue;
     }
 
     if (!inFence && trimmed === "") {
       flush();
+      cursor = lineEnd + 1;
       continue;
     }
 
+    if (currentBlockStart === null) {
+      currentBlockStart = lineStart;
+    }
+
     currentBlock.push(line);
+    currentBlockEnd = lineEnd;
+    cursor = lineEnd + 1;
   }
 
   flush();
@@ -1081,6 +1407,24 @@ function clampNumber(
   }
 
   return Math.min(max, Math.max(min, parsed));
+}
+
+function normalizeFolderPath(value: string): string {
+  return value.trim().replace(/^\/+|\/+$/g, "");
+}
+
+function getLeafFilePath(leaf: WorkspaceLeaf | null | undefined): string | null {
+  const view = leaf?.view;
+
+  if (view instanceof MarkdownView) {
+    return view.file?.path ?? null;
+  }
+
+  if (view instanceof BookModeView) {
+    return view.getFile()?.path ?? null;
+  }
+
+  return null;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {

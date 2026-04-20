@@ -35,6 +35,8 @@ var DEFAULT_SETTINGS = {
   fontScalePercent: 100,
   defaultFocusMode: false,
   openInBookModeByDefault: false,
+  autoOpenFolderPaths: [],
+  debugMode: false,
   showCoverPage: true,
   animatePageTurns: true
 };
@@ -43,6 +45,7 @@ var BookModePlugin = class extends import_obsidian.Plugin {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
     this.suppressAutoBookMode = false;
+    this.autoOpenRequestId = 0;
   }
   async onload() {
     await this.loadSettings();
@@ -130,6 +133,13 @@ var BookModePlugin = class extends import_obsidian.Plugin {
         void this.setFontScale(DEFAULT_SETTINGS.fontScalePercent);
       }
     });
+    this.addCommand({
+      id: "show-book-mode-debug-state",
+      name: "Show Book Mode debug state",
+      callback: () => {
+        this.showDebugState();
+      }
+    });
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (!(file instanceof import_obsidian.TFile)) {
@@ -140,10 +150,37 @@ var BookModePlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
-        if (!(file instanceof import_obsidian.TFile) || !this.settings.openInBookModeByDefault || this.suppressAutoBookMode) {
+        if (!(file instanceof import_obsidian.TFile)) {
+          this.debugLog("file-open skipped: not a file", {
+            file
+          });
           return;
         }
-        void this.openFileInBookMode(file, this.settings.defaultFocusMode);
+        const matchesFolder = this.shouldAutoOpenFile(file);
+        this.debugLog("file-open", {
+          filePath: file.path,
+          openInBookModeByDefault: this.settings.openInBookModeByDefault,
+          suppressAutoBookMode: this.suppressAutoBookMode,
+          matchesFolder,
+          activeLeafType: this.app.workspace.activeLeaf?.view?.getViewType?.() ?? "none",
+          activeFilePath: this.app.workspace.getActiveFile()?.path ?? null
+        });
+        if (!this.settings.openInBookModeByDefault || this.suppressAutoBookMode || !matchesFolder) {
+          this.debugLog("auto-open blocked", {
+            filePath: file.path,
+            reason: !this.settings.openInBookModeByDefault ? "setting-disabled" : this.suppressAutoBookMode ? "suppressed" : "folder-mismatch"
+          });
+          return;
+        }
+        this.scheduleAutoOpen(file);
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        this.debugLog("active-leaf-change", {
+          leafType: leaf?.view?.getViewType?.() ?? "none",
+          filePath: getLeafFilePath(leaf) ?? null
+        });
       })
     );
     this.addSettingTab(new BookModeSettingTab(this.app, this));
@@ -169,6 +206,71 @@ var BookModePlugin = class extends import_obsidian.Plugin {
     const activeView = this.app.workspace.activeLeaf?.view;
     return activeView instanceof BookModeView ? activeView : null;
   }
+  shouldAutoOpenFile(file) {
+    const folderPaths = this.settings.autoOpenFolderPaths.map(normalizeFolderPath).filter(Boolean);
+    if (!folderPaths.length) {
+      return true;
+    }
+    const normalizedFilePath = file.path.toLowerCase();
+    return folderPaths.some((folderPath) => {
+      const normalizedFolderPath = folderPath.toLowerCase();
+      return normalizedFilePath.startsWith(`${normalizedFolderPath}/`);
+    });
+  }
+  showDebugState() {
+    const activeLeaf = this.app.workspace.activeLeaf;
+    const activeFile = this.app.workspace.getActiveFile();
+    const message = [
+      `Book Mode debug`,
+      `file=${activeFile?.path ?? "none"}`,
+      `activeLeaf=${activeLeaf?.view?.getViewType?.() ?? "none"}`,
+      `autoOpen=${String(this.settings.openInBookModeByDefault)}`,
+      `suppress=${String(this.suppressAutoBookMode)}`,
+      `folders=${this.settings.autoOpenFolderPaths.join(", ") || "(all)"}`,
+      `matches=${activeFile instanceof import_obsidian.TFile ? String(this.shouldAutoOpenFile(activeFile)) : "n/a"}`
+    ].join(" | ");
+    this.debugLog("manual state dump", { message }, true);
+  }
+  debugLog(event, details, showNotice = false) {
+    if (!this.settings.debugMode && !showNotice) {
+      return;
+    }
+    const payload = {
+      event,
+      ...details
+    };
+    console.info("[Book Mode]", payload);
+    if (showNotice) {
+      const message = typeof details.message === "string" ? details.message : `${event}: ${JSON.stringify(details)}`;
+      new import_obsidian.Notice(message, 8e3);
+    }
+  }
+  scheduleAutoOpen(file) {
+    const requestId = ++this.autoOpenRequestId;
+    this.debugLog("scheduleAutoOpen", {
+      requestId,
+      filePath: file.path
+    });
+    window.setTimeout(() => {
+      if (requestId !== this.autoOpenRequestId) {
+        this.debugLog("scheduleAutoOpen canceled: superseded", {
+          requestId,
+          filePath: file.path
+        });
+        return;
+      }
+      const activeFile = this.app.workspace.getActiveFile();
+      if (!(activeFile instanceof import_obsidian.TFile) || activeFile.path !== file.path) {
+        this.debugLog("scheduleAutoOpen canceled: active file changed", {
+          requestId,
+          expectedFilePath: file.path,
+          activeFilePath: activeFile?.path ?? null
+        });
+        return;
+      }
+      void this.openFileInBookMode(file, this.settings.defaultFocusMode, 1);
+    }, 0);
+  }
   async openCurrentNoteInBookMode(focusMode = this.settings.defaultFocusMode) {
     const file = this.app.workspace.getActiveFile();
     if (!(file instanceof import_obsidian.TFile)) {
@@ -177,15 +279,26 @@ var BookModePlugin = class extends import_obsidian.Plugin {
     }
     await this.openFileInBookMode(file, focusMode);
   }
-  async openFileInBookMode(file, focusMode = this.settings.defaultFocusMode) {
+  async openFileInBookMode(file, focusMode = this.settings.defaultFocusMode, attempt = 1) {
     const activeView = this.app.workspace.activeLeaf?.view;
     if (activeView instanceof BookModeView && activeView.getFile()?.path === file.path) {
+      this.debugLog("openFileInBookMode skipped: already open", {
+        filePath: file.path
+      });
       return;
     }
     const existingLeaf = this.app.workspace.getLeavesOfType(BOOK_VIEW_TYPE).find((leaf2) => leaf2.view instanceof BookModeView && leaf2.view.getFile()?.path === file.path);
     const activeLeaf = this.app.workspace.activeLeaf;
     const shouldReuseActiveLeaf = activeLeaf?.view instanceof import_obsidian.MarkdownView || activeLeaf?.view?.getViewType?.() === "empty";
     const leaf = existingLeaf ?? (shouldReuseActiveLeaf && activeLeaf ? activeLeaf : this.app.workspace.getLeaf(true));
+    this.debugLog("openFileInBookMode", {
+      filePath: file.path,
+      focusMode,
+      attempt,
+      reusedExistingLeaf: Boolean(existingLeaf),
+      reusedActiveLeaf: !existingLeaf && shouldReuseActiveLeaf && Boolean(activeLeaf),
+      targetLeafTypeBeforeOpen: leaf.view.getViewType?.() ?? "unknown"
+    });
     this.suppressAutoBookMode = true;
     try {
       await leaf.setViewState({
@@ -198,9 +311,39 @@ var BookModePlugin = class extends import_obsidian.Plugin {
         }
       });
       await this.app.workspace.revealLeaf(leaf);
+      const openedInBookMode = leaf.view instanceof BookModeView && leaf.view.getFile()?.path === file.path;
+      this.debugLog("openFileInBookMode result", {
+        filePath: file.path,
+        attempt,
+        targetLeafTypeAfterOpen: leaf.view.getViewType?.() ?? "unknown",
+        openedInBookMode
+      });
+      if (!openedInBookMode && attempt < 3) {
+        const retryDelayMs = attempt * 40;
+        this.debugLog("openFileInBookMode retry scheduled", {
+          filePath: file.path,
+          nextAttempt: attempt + 1,
+          retryDelayMs
+        });
+        window.setTimeout(() => {
+          const activeFile = this.app.workspace.getActiveFile();
+          if (!(activeFile instanceof import_obsidian.TFile) || activeFile.path !== file.path) {
+            this.debugLog("openFileInBookMode retry canceled: active file changed", {
+              filePath: file.path,
+              nextAttempt: attempt + 1,
+              activeFilePath: activeFile?.path ?? null
+            });
+            return;
+          }
+          void this.openFileInBookMode(file, focusMode, attempt + 1);
+        }, retryDelayMs);
+      }
     } finally {
       window.setTimeout(() => {
         this.suppressAutoBookMode = false;
+        this.debugLog("auto-open suppression cleared", {
+          filePath: file.path
+        });
       }, 0);
     }
   }
@@ -328,6 +471,18 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
   }
   getFile() {
     return this.file;
+  }
+  async jumpToSourceOffset(offset) {
+    if (!this.pages.length) {
+      return false;
+    }
+    const pageIndex = this.findPageIndexForOffset(offset);
+    if (pageIndex < 0) {
+      return false;
+    }
+    this.currentPageIndex = pageIndex;
+    await this.renderSpread();
+    return true;
   }
   async refreshFromSource() {
     this.ensureLayout();
@@ -461,7 +616,8 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     this.progressEl.setText(`Pages ${start + 1}-${end} of ${this.pages.length}`);
     for (let offset = 0; offset < visiblePages.length; offset += 1) {
       const pageNumber = start + offset + 1;
-      const markdown = visiblePages[offset];
+      const page = visiblePages[offset];
+      const markdown = page.markdown;
       const isCoverPage = this.plugin.settings.showCoverPage && pageNumber === 1;
       const pageEl = this.createPageElement(pageNumber, isCoverPage);
       const pageContentEl = pageEl.querySelector(".book-mode-page__content");
@@ -532,19 +688,23 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     });
   }
   async paginateMarkdown(markdown) {
-    const source = markdown.replace(/\r\n/g, "\n").trim();
+    const source = markdown.replace(/\r\n/g, "\n");
     const blocks = splitMarkdownIntoBlocks(source);
     const pages = [];
     let currentBlocks = [];
     const pushCurrentPage = () => {
-      const pageMarkdown = joinBlocks(currentBlocks);
+      const pageMarkdown = joinBlocks(currentBlocks.map((block) => block.markdown));
       if (pageMarkdown) {
-        pages.push(pageMarkdown);
+        pages.push({
+          markdown: pageMarkdown,
+          startOffset: currentBlocks[0]?.startOffset ?? null,
+          endOffset: currentBlocks[currentBlocks.length - 1]?.endOffset ?? null
+        });
       }
       currentBlocks = [];
     };
     for (const block of blocks) {
-      const candidate = joinBlocks([...currentBlocks, block]);
+      const candidate = joinBlocks([...currentBlocks, block].map((item) => item.markdown));
       if (candidate && await this.pageFits(candidate)) {
         currentBlocks.push(block);
         continue;
@@ -552,13 +712,13 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
       if (currentBlocks.length) {
         pushCurrentPage();
       }
-      if (await this.pageFits(block)) {
+      if (await this.pageFits(block.markdown)) {
         currentBlocks = [block];
         continue;
       }
       const splitParts = await this.splitOversizedBlock(block);
       for (const part of splitParts) {
-        const splitCandidate = joinBlocks([...currentBlocks, part]);
+        const splitCandidate = joinBlocks([...currentBlocks, part].map((item) => item.markdown));
         if (splitCandidate && await this.pageFits(splitCandidate)) {
           currentBlocks.push(part);
           continue;
@@ -566,10 +726,14 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
         if (currentBlocks.length) {
           pushCurrentPage();
         }
-        if (await this.pageFits(part)) {
+        if (await this.pageFits(part.markdown)) {
           currentBlocks = [part];
         } else {
-          pages.push(part);
+          pages.push({
+            markdown: part.markdown,
+            startOffset: part.startOffset,
+            endOffset: part.endOffset
+          });
         }
       }
     }
@@ -577,40 +741,52 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
       pushCurrentPage();
     }
     if (!pages.length && this.file) {
-      pages.push(`# ${this.file.basename}
+      pages.push({
+        markdown: `# ${this.file.basename}
 
-_This note is empty._`);
+_This note is empty._`,
+        startOffset: null,
+        endOffset: null
+      });
     }
     if (this.plugin.settings.showCoverPage && this.file) {
-      pages.unshift(buildCoverPageMarkdown(this.file));
+      pages.unshift({
+        markdown: buildCoverPageMarkdown(this.file),
+        startOffset: null,
+        endOffset: null
+      });
     }
     return pages;
   }
   async splitOversizedBlock(block) {
-    if (isHardToSplitBlock(block)) {
+    if (isHardToSplitBlock(block.markdown)) {
       return [block];
     }
-    const lineUnits = block.split("\n").filter((line) => line.trim().length > 0);
+    const lineUnits = block.markdown.split("\n").filter((line) => line.trim().length > 0);
     if (lineUnits.length > 1) {
-      return this.packUnitsIntoPages(lineUnits, "\n");
+      return this.packUnitsIntoPages(lineUnits, "\n", block);
     }
-    const sentenceUnits = splitIntoSentences(block);
+    const sentenceUnits = splitIntoSentences(block.markdown);
     if (sentenceUnits.length > 1) {
-      return this.packUnitsIntoPages(sentenceUnits, " ");
+      return this.packUnitsIntoPages(sentenceUnits, " ", block);
     }
-    const wordUnits = block.split(/\s+/).filter(Boolean);
+    const wordUnits = block.markdown.split(/\s+/).filter(Boolean);
     if (wordUnits.length > 1) {
-      return this.packUnitsIntoPages(wordUnits, " ");
+      return this.packUnitsIntoPages(wordUnits, " ", block);
     }
     return [block];
   }
-  async packUnitsIntoPages(units, joiner) {
+  async packUnitsIntoPages(units, joiner, sourceBlock) {
     const pages = [];
     let currentUnits = [];
     const pushCurrent = () => {
       const pageMarkdown = currentUnits.join(joiner).trim();
       if (pageMarkdown) {
-        pages.push(pageMarkdown);
+        pages.push({
+          markdown: pageMarkdown,
+          startOffset: sourceBlock.startOffset,
+          endOffset: sourceBlock.endOffset
+        });
       }
       currentUnits = [];
     };
@@ -631,7 +807,11 @@ _This note is empty._`);
     if (currentUnits.length) {
       pushCurrent();
     }
-    return pages.length ? pages : [units.join(joiner)];
+    return pages.length ? pages : [{
+      markdown: units.join(joiner),
+      startOffset: sourceBlock.startOffset,
+      endOffset: sourceBlock.endOffset
+    }];
   }
   async pageFits(markdown) {
     if (!this.measurePageEl || !this.measureContentEl) {
@@ -687,6 +867,22 @@ _This note is empty._`);
   getMaxStartIndex(pagesPerSpread) {
     return Math.max(0, this.pages.length - pagesPerSpread);
   }
+  findPageIndexForOffset(offset) {
+    const rawIndex = this.pages.findIndex((page) => {
+      if (page.startOffset === null || page.endOffset === null) {
+        return false;
+      }
+      return offset >= page.startOffset && offset <= page.endOffset;
+    });
+    if (rawIndex >= 0) {
+      return this.normalizePageIndex(rawIndex, this.getPagesPerSpread());
+    }
+    const nearestIndex = this.pages.findIndex((page) => page.startOffset !== null && page.startOffset > offset);
+    if (nearestIndex > 0) {
+      return this.normalizePageIndex(nearestIndex - 1, this.getPagesPerSpread());
+    }
+    return nearestIndex === 0 ? this.normalizePageIndex(0, this.getPagesPerSpread()) : -1;
+  }
 };
 var BookModeSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
@@ -726,9 +922,22 @@ var BookModeSettingTab = class extends import_obsidian.PluginSettingTab {
         void this.plugin.updateSettings({ defaultFocusMode });
       });
     });
-    new import_obsidian.Setting(containerEl).setName("Open notes in Book Mode by default").setDesc("When enabled, opening a note automatically switches that leaf into Book Mode.").addToggle((toggle) => {
+    new import_obsidian.Setting(containerEl).setName("Open notes in Book Mode by default").setDesc("When enabled, opening a note automatically switches that leaf into Book Mode. Use the folder list below to limit where this happens.").addToggle((toggle) => {
       toggle.setValue(this.plugin.settings.openInBookModeByDefault).onChange((openInBookModeByDefault) => {
         void this.plugin.updateSettings({ openInBookModeByDefault });
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Auto-open folders").setDesc("One vault-relative folder path per line. 'books' matches everything under books/. 'books/audiobooks' matches only that subtree.").addTextArea((text) => {
+      text.setPlaceholder("books\nreading/longform").setValue(this.plugin.settings.autoOpenFolderPaths.join("\n")).onChange((value) => {
+        const autoOpenFolderPaths = value.split("\n").map(normalizeFolderPath).filter(Boolean);
+        void this.plugin.updateSettings({ autoOpenFolderPaths });
+      });
+      text.inputEl.rows = 4;
+      text.inputEl.cols = 32;
+    });
+    new import_obsidian.Setting(containerEl).setName("Debug mode").setDesc("Log auto-open decisions to the developer console. Helpful when Book Mode seems inconsistent.").addToggle((toggle) => {
+      toggle.setValue(this.plugin.settings.debugMode).onChange((debugMode) => {
+        void this.plugin.updateSettings({ debugMode });
       });
     });
     new import_obsidian.Setting(containerEl).setName("Cover page").setDesc("Insert a generated cover page before the note content.").addToggle((toggle) => {
@@ -761,29 +970,51 @@ function splitMarkdownIntoBlocks(markdown) {
   const lines = markdown.split("\n");
   const blocks = [];
   let currentBlock = [];
+  let currentBlockStart = null;
+  let currentBlockEnd = null;
   let inFence = false;
+  let cursor = 0;
   const flush = () => {
     const block = currentBlock.join("\n").trim();
-    if (block) {
-      blocks.push(block);
+    if (block && currentBlockStart !== null && currentBlockEnd !== null) {
+      blocks.push({
+        markdown: block,
+        startOffset: currentBlockStart,
+        endOffset: currentBlockEnd
+      });
     }
     currentBlock = [];
+    currentBlockStart = null;
+    currentBlockEnd = null;
   };
   for (const line of lines) {
+    const lineStart = cursor;
+    const lineEnd = lineStart + line.length;
     const trimmed = line.trim();
     if (/^(```+|~~~+)/.test(trimmed)) {
+      if (currentBlockStart === null) {
+        currentBlockStart = lineStart;
+      }
       currentBlock.push(line);
+      currentBlockEnd = lineEnd;
       inFence = !inFence;
       if (!inFence) {
         flush();
       }
+      cursor = lineEnd + 1;
       continue;
     }
     if (!inFence && trimmed === "") {
       flush();
+      cursor = lineEnd + 1;
       continue;
     }
+    if (currentBlockStart === null) {
+      currentBlockStart = lineStart;
+    }
     currentBlock.push(line);
+    currentBlockEnd = lineEnd;
+    cursor = lineEnd + 1;
   }
   flush();
   return blocks;
@@ -811,6 +1042,19 @@ function clampNumber(value, min, max, fallback) {
     return fallback;
   }
   return Math.min(max, Math.max(min, parsed));
+}
+function normalizeFolderPath(value) {
+  return value.trim().replace(/^\/+|\/+$/g, "");
+}
+function getLeafFilePath(leaf) {
+  const view = leaf?.view;
+  if (view instanceof import_obsidian.MarkdownView) {
+    return view.file?.path ?? null;
+  }
+  if (view instanceof BookModeView) {
+    return view.getFile()?.path ?? null;
+  }
+  return null;
 }
 function isEditableTarget(target) {
   if (!(target instanceof HTMLElement)) {
