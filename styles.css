@@ -190,3 +190,10 @@
     width: min(100%, 760px);
   }
 }
+
+@media (hover: none) and (pointer: coarse) {
+  .book-mode-page {
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+}

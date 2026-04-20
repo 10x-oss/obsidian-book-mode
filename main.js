@@ -460,6 +460,9 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
         void this.goBackward();
       }
     });
+    this.registerDomEvent(this.contentEl, "click", (event) => {
+      void this.handleTapNavigation(event);
+    });
     await this.renderSpread();
   }
   async onClose() {
@@ -539,6 +542,33 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     this.focusMode = !this.focusMode;
     await this.plugin.updateSettings({ defaultFocusMode: this.focusMode });
     await this.renderSpread();
+  }
+  async handleTapNavigation(event) {
+    if (!this.isTouchNavigationContext() || event.defaultPrevented || event.button !== 0) {
+      return;
+    }
+    if (isInteractiveTarget(event.target) || isEditableTarget(event.target)) {
+      return;
+    }
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) {
+      return;
+    }
+    const pageEl = event.target instanceof HTMLElement ? event.target.closest(".book-mode-page") : null;
+    if (!(pageEl instanceof HTMLElement) || pageEl.classList.contains("book-mode-page--placeholder")) {
+      return;
+    }
+    const rect = pageEl.getBoundingClientRect();
+    if (rect.width <= 0) {
+      return;
+    }
+    event.preventDefault();
+    const relativeX = event.clientX - rect.left;
+    if (relativeX <= rect.width / 2) {
+      await this.goBackward();
+      return;
+    }
+    await this.goForward();
   }
   ensureLayout() {
     this.contentEl.empty();
@@ -867,6 +897,9 @@ _This note is empty._`,
   getMaxStartIndex(pagesPerSpread) {
     return Math.max(0, this.pages.length - pagesPerSpread);
   }
+  isTouchNavigationContext() {
+    return window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+  }
   findPageIndexForOffset(offset) {
     const rawIndex = this.pages.findIndex((page) => {
       if (page.startOffset === null || page.endOffset === null) {
@@ -1061,4 +1094,10 @@ function isEditableTarget(target) {
     return false;
   }
   return Boolean(target.closest("input, textarea, [contenteditable='true']"));
+}
+function isInteractiveTarget(target) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return Boolean(target.closest("a, button, summary, select, option, label, [role='button']"));
 }
