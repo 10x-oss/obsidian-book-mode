@@ -616,10 +616,6 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     this.measureContentEl = this.measurePageEl.createDiv({
       cls: "book-mode-page__content markdown-rendered"
     });
-    this.measurePageEl.createDiv({
-      cls: "book-mode-page__number",
-      text: "measure"
-    });
   }
   async renderSpread() {
     this.ensureLayout();
@@ -686,7 +682,10 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     if (!this.spreadEl) {
       throw new Error("Book Mode spread element is not ready.");
     }
-    const pageEl = this.spreadEl.createDiv({
+    const pageShellEl = this.spreadEl.createDiv({
+      cls: "book-mode-page-shell"
+    });
+    const pageEl = pageShellEl.createDiv({
       cls: [
         "book-mode-page",
         this.plugin.settings.animatePageTurns ? "book-mode-page--animated" : "",
@@ -696,7 +695,7 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     pageEl.createDiv({
       cls: "book-mode-page__content markdown-rendered"
     });
-    pageEl.createDiv({
+    pageShellEl.createDiv({
       cls: "book-mode-page__number",
       text: `Page ${pageNumber}`
     });
@@ -706,13 +705,16 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     if (!this.spreadEl) {
       return;
     }
-    const placeholderEl = this.spreadEl.createDiv({
+    const placeholderShellEl = this.spreadEl.createDiv({
+      cls: "book-mode-page-shell"
+    });
+    const placeholderEl = placeholderShellEl.createDiv({
       cls: "book-mode-page book-mode-page--placeholder"
     });
     placeholderEl.createDiv({
       cls: "book-mode-page__content"
     });
-    placeholderEl.createDiv({
+    placeholderShellEl.createDiv({
       cls: "book-mode-page__number",
       text: ""
     });
