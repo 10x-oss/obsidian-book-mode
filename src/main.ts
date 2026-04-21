@@ -5,6 +5,7 @@ import {
   MarkdownRenderer,
   MarkdownView,
   Notice,
+  Platform,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -21,7 +22,11 @@ interface BookModeSettings {
   pageWidth: number;
   pageHeight: number;
   pageGap: number;
+  pagePadding: number;
+  pageBackgroundStyle: "paper" | "black";
+  mobileLayoutMode: "paged" | "continuous";
   fontScalePercent: number;
+  mobileFontScalePercent: number;
   defaultFocusMode: boolean;
   openInBookModeByDefault: boolean;
   autoOpenFolderPaths: string[];
@@ -52,7 +57,11 @@ const DEFAULT_SETTINGS: BookModeSettings = {
   pageWidth: 420,
   pageHeight: 560,
   pageGap: 28,
+  pagePadding: 32,
+  pageBackgroundStyle: "paper",
+  mobileLayoutMode: "paged",
   fontScalePercent: 100,
+  mobileFontScalePercent: 100,
   defaultFocusMode: false,
   openInBookModeByDefault: false,
   autoOpenFolderPaths: [],
@@ -454,8 +463,9 @@ export default class BookModePlugin extends Plugin {
   }
 
   private async adjustFontScale(delta: number): Promise<void> {
+    const currentFontScale = getEffectiveFontScalePercent(this.settings);
     const nextPercent = clampNumber(
-      String(this.settings.fontScalePercent + delta),
+      String(currentFontScale + delta),
       70,
       180,
       DEFAULT_SETTINGS.fontScalePercent,
@@ -464,6 +474,12 @@ export default class BookModePlugin extends Plugin {
   }
 
   private async setFontScale(fontScalePercent: number): Promise<void> {
+    if (isTouchDeviceContext()) {
+      await this.updateSettings({ mobileFontScalePercent: fontScalePercent });
+      new Notice(`Book Mode mobile font size: ${fontScalePercent}%`);
+      return;
+    }
+
     await this.updateSettings({ fontScalePercent });
     new Notice(`Book Mode font size: ${fontScalePercent}%`);
   }
@@ -490,6 +506,7 @@ export default class BookModePlugin extends Plugin {
 class BookModeView extends ItemView {
   private readonly plugin: BookModePlugin;
   private file: TFile | null = null;
+  private sourceMarkdown = "";
   private currentPageIndex = 0;
   private pages: BookPage[] = [];
   private focusMode = false;
@@ -538,6 +555,7 @@ class BookModeView extends ItemView {
 
     if (!viewState.file) {
       this.file = null;
+      this.sourceMarkdown = "";
       this.pages = [];
       this.currentPageIndex = 0;
       this.focusMode = this.plugin.settings.defaultFocusMode;
@@ -549,6 +567,7 @@ class BookModeView extends ItemView {
 
     if (!(maybeFile instanceof TFile)) {
       this.file = null;
+      this.sourceMarkdown = "";
       this.pages = [];
       this.currentPageIndex = 0;
       this.focusMode = this.plugin.settings.defaultFocusMode;
@@ -646,6 +665,7 @@ class BookModeView extends ItemView {
         return;
       }
 
+      this.sourceMarkdown = source;
       this.pages = await this.paginateMarkdown(source);
 
       if (requestToken !== this.requestToken) {
@@ -746,6 +766,8 @@ class BookModeView extends ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("book-mode-view");
     this.contentEl.toggleClass("book-mode-view--focus", this.focusMode);
+    this.contentEl.toggleClass("book-mode-view--black-page", this.plugin.settings.pageBackgroundStyle === "black");
+    this.contentEl.toggleClass("book-mode-view--mobile-unstyled", this.shouldHidePageStylingOnMobile());
     this.applyCssVars();
 
     this.frameEl = this.contentEl.createDiv({ cls: "book-mode-frame" });
@@ -755,7 +777,7 @@ class BookModeView extends ItemView {
     this.fileLabelEl = titleGroupEl.createDiv({ cls: "book-mode-file" });
     this.progressEl = titleGroupEl.createDiv({ cls: "book-mode-progress" });
 
-    const buttonGroupEl = toolbarEl.createDiv({ cls: "book-mode-toolbar__group" });
+    const buttonGroupEl = toolbarEl.createDiv({ cls: "book-mode-toolbar__group book-mode-toolbar__group--nav" });
     this.previousButtonEl = buttonGroupEl.createEl("button", {
       cls: "book-mode-nav-button",
       text: "Previous",
@@ -781,7 +803,8 @@ class BookModeView extends ItemView {
     this.contentEl.style.setProperty("--book-mode-page-width", `${this.plugin.settings.pageWidth}px`);
     this.contentEl.style.setProperty("--book-mode-page-height", `${this.plugin.settings.pageHeight}px`);
     this.contentEl.style.setProperty("--book-mode-page-gap", `${this.plugin.settings.pageGap}px`);
-    this.contentEl.style.setProperty("--book-mode-font-scale", `${this.plugin.settings.fontScalePercent}%`);
+    this.contentEl.style.setProperty("--book-mode-page-padding", `${this.plugin.settings.pagePadding}px`);
+    this.contentEl.style.setProperty("--book-mode-font-scale", `${getEffectiveFontScalePercent(this.plugin.settings)}%`);
   }
 
   private ensureMeasureElements(): void {
@@ -1166,6 +1189,10 @@ class BookModeView extends ItemView {
     return window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
   }
 
+  private shouldHidePageStylingOnMobile(): boolean {
+    return this.isTouchNavigationContext() && this.plugin.settings.mobileLayoutMode === "continuous";
+  }
+
   private findPageIndexForOffset(offset: number): number {
     const rawIndex = this.pages.findIndex((page) => {
       if (page.startOffset === null || page.endOffset === null) {
@@ -1245,15 +1272,69 @@ class BookModeSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Font scale")
-      .setDesc("Reader font size percentage.")
+      .setName("Page padding")
+      .setDesc("Inner margin inside each page in pixels.")
       .addText((text) => {
         text
-          .setPlaceholder("100")
+          .setPlaceholder("32")
+          .setValue(String(this.plugin.settings.pagePadding))
+          .onChange((value) => {
+            const pagePadding = clampNumber(value, 8, 96, DEFAULT_SETTINGS.pagePadding);
+            void this.plugin.updateSettings({ pagePadding });
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Page background")
+      .setDesc("Choose between the current paper-like page and a solid black page.")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("paper", "Paper")
+          .addOption("black", "Black")
+          .setValue(this.plugin.settings.pageBackgroundStyle)
+          .onChange((pageBackgroundStyle) => {
+            void this.plugin.updateSettings({
+              pageBackgroundStyle: pageBackgroundStyle as BookModeSettings["pageBackgroundStyle"],
+            });
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Hide page styling on mobile")
+      .setDesc("On touch devices, keep pagination but remove the page background and border so it reads like plain text.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.mobileLayoutMode === "continuous")
+          .onChange((enabled) => {
+            void this.plugin.updateSettings({
+              mobileLayoutMode: enabled ? "continuous" : "paged",
+            });
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Desktop font scale")
+      .setDesc("Reader font size percentage on desktop devices.")
+      .addText((text) => {
+        text
+          .setPlaceholder("140")
           .setValue(String(this.plugin.settings.fontScalePercent))
           .onChange((value) => {
             const fontScalePercent = clampNumber(value, 70, 180, DEFAULT_SETTINGS.fontScalePercent);
             void this.plugin.updateSettings({ fontScalePercent });
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Mobile font scale")
+      .setDesc("Reader font size percentage on touch devices like iPhone.")
+      .addText((text) => {
+        text
+          .setPlaceholder("110")
+          .setValue(String(this.plugin.settings.mobileFontScalePercent))
+          .onChange((value) => {
+            const mobileFontScalePercent = clampNumber(value, 70, 180, DEFAULT_SETTINGS.mobileFontScalePercent);
+            void this.plugin.updateSettings({ mobileFontScalePercent });
           });
       });
 
@@ -1464,6 +1545,16 @@ function clampNumber(
 
 function normalizeFolderPath(value: string): string {
   return value.trim().replace(/^\/+|\/+$/g, "");
+}
+
+function isTouchDeviceContext(): boolean {
+  return Platform.isPhone || Platform.isMobile || Platform.isMobileApp || window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+}
+
+function getEffectiveFontScalePercent(settings: BookModeSettings): number {
+  return isTouchDeviceContext()
+    ? settings.mobileFontScalePercent
+    : settings.fontScalePercent;
 }
 
 function getLeafFilePath(leaf: WorkspaceLeaf | null | undefined): string | null {

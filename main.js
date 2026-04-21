@@ -32,7 +32,11 @@ var DEFAULT_SETTINGS = {
   pageWidth: 420,
   pageHeight: 560,
   pageGap: 28,
+  pagePadding: 32,
+  pageBackgroundStyle: "paper",
+  mobileLayoutMode: "paged",
   fontScalePercent: 100,
+  mobileFontScalePercent: 100,
   defaultFocusMode: false,
   openInBookModeByDefault: false,
   autoOpenFolderPaths: [],
@@ -348,8 +352,9 @@ var BookModePlugin = class extends import_obsidian.Plugin {
     }
   }
   async adjustFontScale(delta) {
+    const currentFontScale = getEffectiveFontScalePercent(this.settings);
     const nextPercent = clampNumber(
-      String(this.settings.fontScalePercent + delta),
+      String(currentFontScale + delta),
       70,
       180,
       DEFAULT_SETTINGS.fontScalePercent
@@ -357,6 +362,11 @@ var BookModePlugin = class extends import_obsidian.Plugin {
     await this.setFontScale(nextPercent);
   }
   async setFontScale(fontScalePercent) {
+    if (isTouchDeviceContext()) {
+      await this.updateSettings({ mobileFontScalePercent: fontScalePercent });
+      new import_obsidian.Notice(`Book Mode mobile font size: ${fontScalePercent}%`);
+      return;
+    }
     await this.updateSettings({ fontScalePercent });
     new import_obsidian.Notice(`Book Mode font size: ${fontScalePercent}%`);
   }
@@ -378,6 +388,7 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.file = null;
+    this.sourceMarkdown = "";
     this.currentPageIndex = 0;
     this.pages = [];
     this.focusMode = false;
@@ -416,6 +427,7 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     const viewState = normalizeViewState(state);
     if (!viewState.file) {
       this.file = null;
+      this.sourceMarkdown = "";
       this.pages = [];
       this.currentPageIndex = 0;
       this.focusMode = this.plugin.settings.defaultFocusMode;
@@ -425,6 +437,7 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     const maybeFile = this.app.vault.getAbstractFileByPath(viewState.file);
     if (!(maybeFile instanceof import_obsidian.TFile)) {
       this.file = null;
+      this.sourceMarkdown = "";
       this.pages = [];
       this.currentPageIndex = 0;
       this.focusMode = this.plugin.settings.defaultFocusMode;
@@ -500,6 +513,7 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
       if (requestToken !== this.requestToken) {
         return;
       }
+      this.sourceMarkdown = source;
       this.pages = await this.paginateMarkdown(source);
       if (requestToken !== this.requestToken) {
         return;
@@ -574,13 +588,15 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("book-mode-view");
     this.contentEl.toggleClass("book-mode-view--focus", this.focusMode);
+    this.contentEl.toggleClass("book-mode-view--black-page", this.plugin.settings.pageBackgroundStyle === "black");
+    this.contentEl.toggleClass("book-mode-view--mobile-unstyled", this.shouldHidePageStylingOnMobile());
     this.applyCssVars();
     this.frameEl = this.contentEl.createDiv({ cls: "book-mode-frame" });
     const toolbarEl = this.frameEl.createDiv({ cls: "book-mode-toolbar" });
     const titleGroupEl = toolbarEl.createDiv({ cls: "book-mode-toolbar__group" });
     this.fileLabelEl = titleGroupEl.createDiv({ cls: "book-mode-file" });
     this.progressEl = titleGroupEl.createDiv({ cls: "book-mode-progress" });
-    const buttonGroupEl = toolbarEl.createDiv({ cls: "book-mode-toolbar__group" });
+    const buttonGroupEl = toolbarEl.createDiv({ cls: "book-mode-toolbar__group book-mode-toolbar__group--nav" });
     this.previousButtonEl = buttonGroupEl.createEl("button", {
       cls: "book-mode-nav-button",
       text: "Previous"
@@ -603,7 +619,8 @@ var BookModeView = class _BookModeView extends import_obsidian.ItemView {
     this.contentEl.style.setProperty("--book-mode-page-width", `${this.plugin.settings.pageWidth}px`);
     this.contentEl.style.setProperty("--book-mode-page-height", `${this.plugin.settings.pageHeight}px`);
     this.contentEl.style.setProperty("--book-mode-page-gap", `${this.plugin.settings.pageGap}px`);
-    this.contentEl.style.setProperty("--book-mode-font-scale", `${this.plugin.settings.fontScalePercent}%`);
+    this.contentEl.style.setProperty("--book-mode-page-padding", `${this.plugin.settings.pagePadding}px`);
+    this.contentEl.style.setProperty("--book-mode-font-scale", `${getEffectiveFontScalePercent(this.plugin.settings)}%`);
   }
   ensureMeasureElements() {
     if (!this.contentEl.isConnected) {
@@ -902,6 +919,9 @@ _This note is empty._`,
   isTouchNavigationContext() {
     return window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
   }
+  shouldHidePageStylingOnMobile() {
+    return this.isTouchNavigationContext() && this.plugin.settings.mobileLayoutMode === "continuous";
+  }
   findPageIndexForOffset(offset) {
     const rawIndex = this.pages.findIndex((page) => {
       if (page.startOffset === null || page.endOffset === null) {
@@ -946,10 +966,36 @@ var BookModeSettingTab = class extends import_obsidian.PluginSettingTab {
         void this.plugin.updateSettings({ pageGap });
       });
     });
-    new import_obsidian.Setting(containerEl).setName("Font scale").setDesc("Reader font size percentage.").addText((text) => {
-      text.setPlaceholder("100").setValue(String(this.plugin.settings.fontScalePercent)).onChange((value) => {
+    new import_obsidian.Setting(containerEl).setName("Page padding").setDesc("Inner margin inside each page in pixels.").addText((text) => {
+      text.setPlaceholder("32").setValue(String(this.plugin.settings.pagePadding)).onChange((value) => {
+        const pagePadding = clampNumber(value, 8, 96, DEFAULT_SETTINGS.pagePadding);
+        void this.plugin.updateSettings({ pagePadding });
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Page background").setDesc("Choose between the current paper-like page and a solid black page.").addDropdown((dropdown) => {
+      dropdown.addOption("paper", "Paper").addOption("black", "Black").setValue(this.plugin.settings.pageBackgroundStyle).onChange((pageBackgroundStyle) => {
+        void this.plugin.updateSettings({
+          pageBackgroundStyle
+        });
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Hide page styling on mobile").setDesc("On touch devices, keep pagination but remove the page background and border so it reads like plain text.").addToggle((toggle) => {
+      toggle.setValue(this.plugin.settings.mobileLayoutMode === "continuous").onChange((enabled) => {
+        void this.plugin.updateSettings({
+          mobileLayoutMode: enabled ? "continuous" : "paged"
+        });
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Desktop font scale").setDesc("Reader font size percentage on desktop devices.").addText((text) => {
+      text.setPlaceholder("140").setValue(String(this.plugin.settings.fontScalePercent)).onChange((value) => {
         const fontScalePercent = clampNumber(value, 70, 180, DEFAULT_SETTINGS.fontScalePercent);
         void this.plugin.updateSettings({ fontScalePercent });
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Mobile font scale").setDesc("Reader font size percentage on touch devices like iPhone.").addText((text) => {
+      text.setPlaceholder("110").setValue(String(this.plugin.settings.mobileFontScalePercent)).onChange((value) => {
+        const mobileFontScalePercent = clampNumber(value, 70, 180, DEFAULT_SETTINGS.mobileFontScalePercent);
+        void this.plugin.updateSettings({ mobileFontScalePercent });
       });
     });
     new import_obsidian.Setting(containerEl).setName("Default focus mode").setDesc("Hide the top toolbar when Book Mode opens.").addToggle((toggle) => {
@@ -1080,6 +1126,12 @@ function clampNumber(value, min, max, fallback) {
 }
 function normalizeFolderPath(value) {
   return value.trim().replace(/^\/+|\/+$/g, "");
+}
+function isTouchDeviceContext() {
+  return import_obsidian.Platform.isPhone || import_obsidian.Platform.isMobile || import_obsidian.Platform.isMobileApp || window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+}
+function getEffectiveFontScalePercent(settings) {
+  return isTouchDeviceContext() ? settings.mobileFontScalePercent : settings.fontScalePercent;
 }
 function getLeafFilePath(leaf) {
   const view = leaf?.view;

@@ -106,6 +106,48 @@
   opacity: 1;
 }
 
+.book-mode-view--black-page .book-mode-page {
+  background: #000;
+  border-color: color-mix(in srgb, #fff 16%, transparent);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
+}
+
+.book-mode-view--black-page .book-mode-page__content,
+.book-mode-view--black-page .book-mode-page__content :is(h1, h2, h3, h4, h5, h6, p, li, blockquote, strong, em, code, pre, table, th, td) {
+  color: #f5f5f5;
+}
+
+.book-mode-view--black-page .book-mode-page__content a {
+  color: #9fd3ff;
+}
+
+.book-mode-view--black-page .book-mode-page__number {
+  color: color-mix(in srgb, #fff 55%, transparent);
+}
+
+.book-mode-view--mobile-unstyled .book-mode-page-shell {
+  width: 100%;
+  max-width: none;
+  gap: 6px;
+}
+
+.book-mode-view--mobile-unstyled .book-mode-page {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0 8px;
+}
+
+.book-mode-view--mobile-unstyled .book-mode-page__number {
+  letter-spacing: 0.04em;
+}
+
+.book-mode-view--black-page.book-mode-view--mobile-unstyled .book-mode-page {
+  background: transparent;
+  border-color: transparent;
+}
+
 .book-mode-page__content {
   flex: 1 1 auto;
   font-size: var(--book-mode-font-scale);
@@ -201,6 +243,10 @@
 
   .book-mode-page-shell {
     width: min(100%, 760px);
+  }
+
+  .book-mode-view--mobile-unstyled .book-mode-page {
+    padding: 0 4px;
   }
 }
 
